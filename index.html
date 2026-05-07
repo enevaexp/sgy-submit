@@ -1,0 +1,1290 @@
+<!--
+================================================================================
+  SUBMISSÃO DE ARQUIVO SGY — SÍSMICA
+  Interface web para envio formal de arquivos SEG-Y ao fluxo de gestão de dados
+  de Exploração e Produção da ENEVA.
+
+  Funcionalidades:
+    - Leitura dos primeiros 3.600 bytes do arquivo (cabeçalho SEG-Y)
+    - Conversão EBCDIC → ASCII do Textual Header
+    - Parse do Binary Header por offset de bytes
+    - Extração via regex: survey name, empresa adquiridora, empresa processadora, CRS
+    - QC automático com 6 checks visuais (✅ ⚠️ ❌)
+    - MD5 do arquivo completo para 2D / MD5 do header para 3D
+    - Três combo boxes encadeadas: Aquisição, Domínio, Processamento
+    - Envio via webhook HTTP para Power Automate
+    - Histórico de sessão, modal de confirmação, timeout 50s
+
+  Autor:    Leandro Ribeiro
+  Setor:    Data Management — Exploração & Produção
+  Empresa:  ENEVA S.A.
+  Data:     Maio de 2026
+  Versão:   1.0
+================================================================================
+-->
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Submissão de Arquivo SGY — ENEVA E&P</title>
+<style>
+  :root {
+    --bg:       #151E25;
+    --surface:  #1E2C35;
+    --surface2: #243340;
+    --surface3: #1A2830;
+    --text:     #FFFAF6;
+    --subtext:  #8A9BA8;
+    --border:   #2C3E4A;
+    --destaque: #E86D4E;
+    --teal:     #306E7D;
+    --verde:    #3A7D5C;
+    --ambar:    #C4873A;
+    --ok:       #3A7D5C;
+    --ok-bg:    #1A2E25;
+    --ok-bdr:   #2E5C42;
+    --err:      #C0392B;
+    --err-bg:   #2A1A18;
+    --err-bdr:  #5C2E2A;
+    --warn-bg:  #2A2218;
+    --warn-bdr: #5C4A2A;
+    --radius:   10px;
+    --shadow:   0 4px 20px rgba(0,0,0,0.35);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg); color: var(--text);
+    min-height: 100vh; padding: 0 0 60px;
+  }
+
+  /* TOP BAR */
+  .top-bar {
+    background: var(--surface3); border-bottom: 1px solid var(--border);
+    padding: 10px 32px; display: flex; align-items: center; gap: 10px;
+  }
+  .top-bar .label {
+    color: var(--subtext); font-size: 12px; font-weight: 600;
+    letter-spacing: 1.5px; text-transform: uppercase;
+  }
+
+  /* PAGE HEADER */
+  .page-header {
+    background: var(--surface); border-bottom: 2px solid var(--teal);
+    padding: 28px 32px 24px;
+  }
+  .page-header .eyebrow {
+    font-size: 11px; font-weight: 700; letter-spacing: 2.5px;
+    text-transform: uppercase; color: var(--teal); margin-bottom: 6px;
+  }
+  .page-header h1 {
+    font-size: 26px; font-weight: 700; color: var(--text);
+    line-height: 1.2; margin-bottom: 6px;
+  }
+  .page-header .subtitle { font-size: 13px; color: var(--subtext); }
+
+  /* CONTAINER */
+  .container { max-width: 820px; margin: 0 auto; padding: 28px 16px 0; }
+
+  /* CARD */
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 3px solid var(--teal);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+    margin-bottom: 16px; overflow: hidden;
+  }
+  .card-header {
+    padding: 13px 20px; border-bottom: 1px solid var(--border);
+    font-size: 10.5px; font-weight: 700; letter-spacing: 1.8px;
+    text-transform: uppercase; color: var(--subtext);
+    background: var(--surface2); display: flex; align-items: center; gap: 8px;
+  }
+  .card-body { padding: 20px; }
+
+  /* COMBOS */
+  .combos-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  .combo-item { display: flex; flex-direction: column; gap: 6px; }
+  .combo-item label {
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.8px;
+    text-transform: uppercase; color: var(--subtext);
+  }
+  .combo-select {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 9px 12px;
+    color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif;
+    font-size: 13px; outline: none; cursor: pointer;
+    transition: border-color .2s; appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%238A9BA8' stroke-width='1.5' fill='none'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 12px center;
+    padding-right: 32px;
+  }
+  .combo-select:focus { border-color: var(--teal); }
+  .combo-select:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* DROPZONE */
+  .dropzone {
+    border: 2px dashed var(--border); border-radius: var(--radius);
+    padding: 48px 24px; text-align: center; cursor: pointer;
+    transition: all .25s; background: var(--surface2);
+  }
+  .dropzone:hover, .dropzone.dragover { border-color: var(--teal); background: #1E3040; }
+  .dropzone.has-file { border-color: var(--verde); background: var(--ok-bg); border-style: solid; }
+  .dropzone.disabled { opacity: 0.4; pointer-events: none; cursor: not-allowed; }
+  .dropzone-icon { font-size: 36px; margin-bottom: 12px; display: block; color: var(--subtext); }
+  .dropzone.has-file .dropzone-icon { color: var(--verde); }
+  .dropzone h3 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .dropzone p { font-size: 13px; color: var(--subtext); margin-bottom: 16px; }
+  .btn-select {
+    background: var(--teal); color: #fff; border: none; border-radius: 6px;
+    padding: 9px 22px; font-size: 13px; font-weight: 600; cursor: pointer;
+    font-family: 'Segoe UI', system-ui, sans-serif; transition: background .2s;
+  }
+  .btn-select:hover { background: #245A68; }
+  .dropzone .file-hint { display: block; font-size: 11px; color: var(--subtext); margin-top: 14px; }
+  #file-input { display: none; }
+  .tipo-required-hint {
+    text-align: center; font-size: 12px; color: var(--ambar);
+    margin-top: 10px; display: none;
+  }
+  .tipo-required-hint.show { display: block; }
+
+  /* QC CHECKS */
+  .qc-grid { display: flex; flex-direction: column; gap: 8px; }
+  .qc-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-radius: 6px;
+    background: var(--surface2); border: 1px solid var(--border);
+    font-size: 13px; transition: all .3s;
+  }
+  .qc-item.ok    { border-color: var(--ok-bdr);  background: var(--ok-bg); }
+  .qc-item.warn  { border-color: var(--warn-bdr); background: var(--warn-bg); }
+  .qc-item.fail  { border-color: var(--err-bdr);  background: var(--err-bg); }
+  .qc-icon { font-size: 16px; flex-shrink: 0; }
+  .qc-label { flex: 1; color: var(--text); font-weight: 500; }
+  .qc-detail { font-size: 11px; color: var(--subtext); font-family: 'Courier New', monospace; }
+
+  /* METADATA */
+  .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .meta-item { display: flex; flex-direction: column; gap: 4px; }
+  .meta-item label {
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.8px;
+    text-transform: uppercase; color: var(--subtext);
+  }
+  .meta-value {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 5px; padding: 7px 10px;
+    font-family: 'Courier New', monospace; font-size: 12px; color: var(--text); min-height: 32px;
+  }
+  .meta-value.empty { color: var(--subtext); font-style: italic; font-family: 'Segoe UI', system-ui, sans-serif; font-size: 12px; }
+  .meta-value.regex-found { border-color: var(--ok-bdr); }
+  .meta-value.regex-not-found { border-color: var(--warn-bdr); }
+
+  /* TEXTUAL HEADER */
+  .textual-header-wrap { margin-top: 14px; }
+  .textual-toggle {
+    background: none; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--subtext); padding: 6px 14px; font-size: 12px; cursor: pointer;
+    font-family: 'Segoe UI', system-ui, sans-serif; transition: all .2s;
+  }
+  .textual-toggle:hover { border-color: var(--teal); color: var(--teal); }
+  .textual-content {
+    display: none; margin-top: 10px;
+    background: #0D1620; border: 1px solid var(--border);
+    border-radius: 6px; padding: 14px;
+    font-family: 'Courier New', monospace; font-size: 11px;
+    color: #6DC4D0; line-height: 1.8; white-space: pre; overflow-x: auto;
+    max-height: 300px; overflow-y: auto;
+  }
+  .textual-content.show { display: block; }
+
+  /* PROGRESS */
+  .progress-wrap {
+    display: none; flex-direction: column; gap: 8px;
+    padding: 16px 20px; background: var(--surface2); border-top: 1px solid var(--border);
+  }
+  .progress-wrap.show { display: flex; }
+  .progress-step {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 13px; color: var(--subtext); transition: color .3s;
+  }
+  .progress-step.active { color: var(--text); }
+  .progress-step.done   { color: #5DBF8A; }
+  .progress-step.error  { color: #E07070; }
+  .step-icon { font-size: 16px; width: 20px; text-align: center; }
+  .step-bar { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 4px; }
+  .step-bar-fill { height: 100%; background: var(--teal); width: 0%; transition: width 1s linear; border-radius: 2px; }
+
+  /* ACTIONS */
+  .actions {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 18px 20px; border-top: 1px solid var(--border); background: var(--surface2);
+  }
+  .btn-back {
+    background: none; border: 1px solid var(--border); color: var(--subtext);
+    border-radius: 6px; padding: 9px 18px; font-size: 13px; font-weight: 600;
+    cursor: pointer; font-family: 'Segoe UI', system-ui, sans-serif; transition: all .2s;
+  }
+  .btn-back:hover { border-color: var(--subtext); color: var(--text); }
+  .btn-submit {
+    background: var(--teal); color: #fff; border: none; border-radius: 6px;
+    padding: 9px 24px; font-size: 13px; font-weight: 600; cursor: pointer;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    transition: background .2s; display: flex; align-items: center; gap: 8px;
+  }
+  .btn-submit:hover:not(:disabled) { background: #245A68; }
+  .btn-submit:disabled { background: var(--border); color: var(--subtext); cursor: not-allowed; }
+  .btn-submit.loading { opacity: 0.7; pointer-events: none; }
+  .spinner {
+    width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: #fff; border-radius: 50%;
+    animation: spin .7s linear infinite; display: none;
+  }
+  .btn-submit.loading .spinner { display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* MODAL */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000; opacity: 0; pointer-events: none; transition: opacity .3s;
+  }
+  .modal-overlay.show { opacity: 1; pointer-events: all; }
+  .modal {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; padding: 32px; width: 90%; max-width: 480px;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.5);
+    transform: translateY(20px); transition: transform .3s;
+  }
+  .modal-overlay.show .modal { transform: translateY(0); }
+  .modal-icon { font-size: 48px; text-align: center; margin-bottom: 12px; }
+  .modal-title { font-size: 20px; font-weight: 700; color: var(--text); text-align: center; margin-bottom: 6px; }
+  .modal-subtitle { font-size: 13px; color: var(--subtext); text-align: center; margin-bottom: 20px; line-height: 1.6; }
+  .modal-meta {
+    background: var(--surface2); border-radius: 8px;
+    padding: 14px 16px; margin-bottom: 20px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .modal-meta-row { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+  .modal-meta-row .mlabel { color: var(--subtext); font-weight: 600; }
+  .modal-meta-row .mvalue { color: var(--text); font-family: 'Courier New', monospace; font-size: 11px; }
+  .modal-actions { display: flex; gap: 10px; }
+  .btn-modal-novo {
+    flex: 1; background: var(--teal); color: #fff; border: none; border-radius: 8px;
+    padding: 11px; font-size: 13px; font-weight: 600; cursor: pointer;
+    font-family: 'Segoe UI', system-ui, sans-serif; transition: background .2s;
+  }
+  .btn-modal-novo:hover { background: #245A68; }
+  .btn-modal-fechar {
+    flex: 1; background: none; color: var(--subtext); border: 1px solid var(--border);
+    border-radius: 8px; padding: 11px; font-size: 13px; font-weight: 600; cursor: pointer;
+    font-family: 'Segoe UI', system-ui, sans-serif; transition: all .2s;
+  }
+  .btn-modal-fechar:hover { border-color: var(--subtext); color: var(--text); }
+
+  /* HISTORY */
+  .history-empty { text-align: center; color: var(--subtext); font-size: 13px; padding: 20px 0; }
+  .history-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 0; border-bottom: 1px solid var(--border);
+  }
+  .history-item:last-child { border-bottom: none; }
+  .history-badge {
+    font-size: 10px; font-weight: 700; padding: 3px 8px;
+    border-radius: 4px; text-transform: uppercase; white-space: nowrap;
+    background: #1A2E35; color: #6DC4D0; border: 1px solid var(--teal);
+  }
+  .history-info { flex: 1; min-width: 0; }
+  .history-survey { font-size: 13px; font-weight: 600; color: var(--text); }
+  .history-file { font-size: 11px; color: var(--subtext); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .history-time { font-size: 11px; color: var(--subtext); white-space: nowrap; }
+
+
+  /* FALLBACK COMBOS */
+  .field-with-fallback { display: flex; flex-direction: column; gap: 6px; }
+  .field-with-fallback label {
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.8px;
+    text-transform: uppercase; color: var(--subtext);
+  }
+  .field-row { display: flex; gap: 8px; align-items: center; }
+  .field-row .meta-value { flex: 1; margin: 0; }
+  .field-row .fallback-select {
+    flex: 1;
+    background: var(--surface2); border: 1px solid var(--ambar);
+    border-radius: 6px; padding: 7px 10px;
+    color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif;
+    font-size: 12px; outline: none; cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%238A9BA8' stroke-width='1.5' fill='none'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center;
+    padding-right: 28px;
+    transition: border-color .2s;
+  }
+  .field-row .fallback-select:focus { border-color: var(--teal); }
+  .fallback-hint {
+    font-size: 10px; color: var(--ambar); margin-top: 2px;
+  }
+  /* TOAST */
+  .toast {
+    position: fixed; bottom: 28px; right: 28px;
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 20px; font-size: 13px; font-weight: 500;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    transform: translateY(80px); opacity: 0;
+    transition: all .35s cubic-bezier(.34,1.56,.64,1);
+    z-index: 999; max-width: 360px;
+  }
+  .toast.show   { transform: translateY(0); opacity: 1; }
+  .toast.success { background: var(--ok-bg);  border-color: var(--ok-bdr);  color: #5DBF8A; }
+  .toast.error   { background: var(--err-bg); border-color: var(--err-bdr); color: #E07070; }
+
+  .page-footer { text-align: center; padding: 32px 16px 0; font-size: 11px; color: var(--subtext); }
+
+  @media (max-width: 600px) {
+    .meta-grid { grid-template-columns: 1fr; }
+    .combos-grid { grid-template-columns: 1fr; }
+    .page-header { padding: 20px 16px 16px; }
+    .container { padding: 16px 10px 0; }
+  }
+</style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div class="top-bar">
+  <span class="label">Data Management E&P</span>
+  <div style="margin-left:auto; background:#1A2830; line-height:0; border-radius:4px; overflow:hidden;">
+    <img src="data:image/png;base64,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" alt="ENEVA" style="height:32px; display:block; mix-blend-mode:screen;" />
+  </div>
+</div>
+
+<!-- PAGE HEADER -->
+<div class="page-header">
+  <div class="eyebrow">ENEVA · DATA MANAGEMENT E&P</div>
+  <h1>Submissão de Arquivo Sísmico</h1>
+  <div class="subtitle">Envio oficial via Power Automate — Dados Sísmicos SEG-Y</div>
+</div>
+
+<!-- HIDDEN WEBHOOK -->
+<input type="hidden" id="webhook-url" value="https://default204da8d8b4164fedb9c1878136be87.a1.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/48bd419e954c436a9a1cd4b00a2a071f/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=Gi12n2j_u_8HiV42RJMh2XV67lBRhY4Glav40tzTxJk" />
+
+<div class="container">
+
+  <!-- CLASSIFICAÇÃO -->
+  <div class="card">
+    <div class="card-header">🗂️ Classificação do Dado</div>
+    <div class="card-body">
+      <div class="combos-grid">
+        <div class="combo-item">
+          <label>Tipo de Aquisição</label>
+          <select class="combo-select" id="combo-aquisicao" onchange="onAquisicaoChange()">
+            <option value="2D">2D</option>
+            <option value="3D">3D</option>
+          </select>
+        </div>
+        <div class="combo-item">
+          <label>Domínio</label>
+          <select class="combo-select" id="combo-dominio" onchange="onDominioChange()">
+            <option value="Tempo">Tempo</option>
+            <option value="Profundidade">Profundidade</option>
+            <option value="Ambos">Ambos</option>
+          </select>
+        </div>
+        <div class="combo-item">
+          <label>Tipo de Processamento</label>
+          <select class="combo-select" id="combo-processamento">
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- DROPZONE -->
+  <div class="card">
+    <div class="card-body">
+      <div class="dropzone" id="dropzone">
+        <span class="dropzone-icon" id="dz-icon">📂</span>
+        <h3 id="dz-title">Arraste o arquivo SEG-Y aqui</h3>
+        <p id="dz-sub">ou clique para selecionar</p>
+        <button class="btn-select" onclick="document.getElementById('file-input').click()">
+          Selecionar arquivo .sgy / .segy
+        </button>
+        <span class="file-hint">Arquivos .sgy · .segy · .SGY · .SEGY · SEG-Y 2.0</span>
+        <input type="file" id="file-input" accept=".sgy,.segy,.SGY,.SEGY" />
+      </div>
+      <p class="tipo-required-hint" id="tipo-hint">⚠️ Aguardando seleção do arquivo</p>
+    </div>
+  </div>
+
+  <!-- VALIDATION BANNER -->
+  <div class="banner" id="validation-banner" style="display:none;"></div>
+
+  <!-- QC CHECKS -->
+  <div class="card" id="qc-card" style="display:none;">
+    <div class="card-header">🔍 Quality Check — Header SEG-Y</div>
+    <div class="card-body">
+      <div class="qc-grid" id="qc-grid"></div>
+    </div>
+  </div>
+
+  <!-- METADATA -->
+  <div class="card" id="metadata-card" style="display:none;">
+    <div class="card-header">📋 Metadados Extraídos</div>
+    <div class="card-body">
+
+      <div style="margin-bottom:14px;">
+        <div style="font-size:10.5px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;color:var(--subtext);margin-bottom:8px;">Identificação do Arquivo</div>
+        <div class="meta-grid">
+          <div class="meta-item">
+            <label>Nome do Arquivo</label>
+            <div class="meta-value" id="m-filename">—</div>
+          </div>
+          <div class="meta-item">
+            <label>Tamanho</label>
+            <div class="meta-value" id="m-size">—</div>
+          </div>
+          <div class="meta-item">
+            <label>MD5</label>
+            <div class="meta-value" id="m-md5" style="grid-column:span 1; font-size:10px;">⏳ calculando...</div>
+          </div>
+          <div class="meta-item">
+            <label>Submission ID</label>
+            <div class="meta-value" id="m-sid" style="font-size:10px;">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-bottom:14px;">
+        <div style="font-size:10.5px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;color:var(--subtext);margin-bottom:8px;">Parâmetros Técnicos (Binary Header)</div>
+        <div class="meta-grid">
+          <div class="meta-item">
+            <label>Versão SEG-Y</label>
+            <div class="meta-value" id="m-version">—</div>
+          </div>
+          <div class="meta-item">
+            <label>Formato de Dado</label>
+            <div class="meta-value" id="m-format">—</div>
+          </div>
+          <div class="meta-item">
+            <label>Intervalo de Amostragem</label>
+            <div class="meta-value" id="m-interval">—</div>
+          </div>
+          <div class="meta-item">
+            <label>Amostras por Traço</label>
+            <div class="meta-value" id="m-samples">—</div>
+          </div>
+          <div class="meta-item">
+            <label>Tempo de Registro</label>
+            <div class="meta-value" id="m-rectime">—</div>
+          </div>
+          <div class="meta-item">
+            <label>Byte Order</label>
+            <div class="meta-value" id="m-byteorder">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div style="font-size:10.5px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;color:var(--subtext);margin-bottom:8px;">Informações do Survey (Textual Header — regex)</div>
+        <div class="meta-grid">
+          <div class="meta-item">
+            <label>Nome do Survey</label>
+            <div class="meta-value" id="m-survey">—</div>
+          </div>
+          <div class="meta-item">
+            <label>Empresa Adquiridora</label>
+            <div class="meta-value" id="m-client">—</div>
+          </div>
+          <div class="field-with-fallback">
+            <label>Empresa Processadora</label>
+            <div class="field-row">
+              <div class="meta-value" id="m-processor">—</div>
+              <select class="fallback-select" id="sel-processor">
+                <option value="">— selecionar —</option>
+                <option value="Contratada1">Contratada1</option>
+                <option value="Contratada2">Contratada2</option>
+              </select>
+            </div>
+            <span class="fallback-hint">⚠️ Se não identificado automaticamente, selecione acima</span>
+          </div>
+          <div class="field-with-fallback">
+            <label>Sistema de Coordenadas (CRS)</label>
+            <div class="field-row">
+              <div class="meta-value" id="m-crs">—</div>
+              <select class="fallback-select" id="sel-crs">
+                <option value="">— selecionar —</option>
+                <option value="CRS1">CRS1</option>
+                <option value="CRS2">CRS2</option>
+              </select>
+            </div>
+            <span class="fallback-hint">⚠️ Se não identificado automaticamente, selecione acima</span>
+          </div>
+        </div>
+        <div class="textual-header-wrap">
+          <button class="textual-toggle" onclick="toggleTextual()">📄 Ver Textual Header completo</button>
+          <div class="textual-content" id="textual-content"></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ACTIONS -->
+  <div class="card" id="actions-card" style="display:none;">
+    <div class="progress-wrap" id="progress-wrap">
+      <div class="progress-step" id="step-1"><span class="step-icon">📦</span> Preparando dados...</div>
+      <div class="progress-step" id="step-2"><span class="step-icon">📡</span> Enviando para Power Automate...</div>
+      <div class="step-bar"><div class="step-bar-fill" id="step-bar-fill"></div></div>
+      <div class="progress-step" id="step-3"><span class="step-icon">✅</span> Concluído</div>
+    </div>
+    <div class="actions">
+      <button class="btn-back" onclick="resetForm()">↩ Início</button>
+      <button class="btn-submit" id="btn-submit" disabled>
+        <div class="spinner"></div>
+        <span id="btn-label">Revisar e enviar →</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- HISTORY -->
+  <div class="card" id="history-card" style="display:none;">
+    <div class="card-header">🕓 Histórico da Sessão</div>
+    <div class="card-body" id="history-body">
+      <div class="history-empty">Nenhum envio nesta sessão.</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- MODAL -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal">
+    <div class="modal-icon">✅</div>
+    <div class="modal-title">Arquivo enviado com sucesso!</div>
+    <div class="modal-subtitle">O arquivo foi recebido e está em processamento.<br>A equipe responsável foi notificada automaticamente.</div>
+    <div class="modal-meta" id="modal-meta"></div>
+    <div class="modal-actions">
+      <button class="btn-modal-novo" onclick="closeModalAndReset()">Novo envio</button>
+      <button class="btn-modal-fechar" onclick="closeModal()">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<div class="page-footer">ENEVA · Data Management E&P · Submissão de Dados Sísmicos SEG-Y</div>
+<div class="toast" id="toast"></div>
+
+<script>
+// ─── DADOS DE PROCESSAMENTO ───────────────────────────────────────────────────
+// Tabela de tipos de processamento com domínio associado.
+// TIME = aparece em Tempo | DEPTH = aparece em Profundidade | BOTH = aparece em Ambos
+// Quando aquisição = 3D, apenas N/A fica disponível.
+const PROCESSING_TYPES = [
+  { name: 'Volume Empilhado sem migração', sigla: 'STK',      domain: 'TIME'  },
+  { name: 'PreStack Time Migration',       sigla: 'PSTM',     domain: 'TIME'  },
+  { name: 'PostStack Time Migration',      sigla: 'PostSTM',  domain: 'TIME'  },
+  { name: 'PreStack Depth Migration',      sigla: 'PSDM',     domain: 'DEPTH' },
+  { name: 'PostStack Depth Migration',     sigla: 'PostSDM',  domain: 'DEPTH' },
+  { name: 'Common Reflection Surface',     sigla: 'CRS',      domain: 'BOTH'  },
+  { name: 'Sem Filtro',                    sigla: 'SFLT',     domain: 'BOTH'  },
+  { name: 'High Frequency Enhancement',    sigla: 'HFE',      domain: 'BOTH'  },
+  { name: 'Velocidade Intervalar',         sigla: 'Vint',     domain: 'DEPTH' },
+  { name: 'Velocidade RMS',               sigla: 'VRMS',     domain: 'TIME'  },
+  { name: 'N/A',                          sigla: 'N/A',      domain: 'BOTH'  }
+];
+
+// ─── EBCDIC TABLE ─────────────────────────────────────────────────────────────
+// Tabela de conversão EBCDIC → ASCII para leitura do Textual Header SEG-Y.
+// O Textual Header é codificado em EBCDIC por especificação histórica do SEG-Y.
+const EBCDIC = [
+  0,1,2,3,156,9,134,127,151,141,142,11,12,13,14,15,
+  16,17,18,19,157,133,8,135,24,25,146,143,28,29,30,31,
+  128,129,130,131,132,10,23,27,136,137,138,139,140,5,6,7,
+  144,145,22,147,148,149,150,4,152,153,154,155,20,21,158,26,
+  32,160,161,162,163,164,165,166,167,168,91,46,60,40,43,33,
+  38,169,170,171,172,173,174,175,176,177,93,36,42,41,59,94,
+  45,47,178,179,180,181,182,183,184,185,124,44,37,95,62,63,
+  186,187,188,189,190,191,192,193,194,96,58,35,64,39,61,34,
+  195,97,98,99,100,101,102,103,104,105,196,197,198,199,200,201,
+  202,106,107,108,109,110,111,112,113,114,203,204,205,206,207,208,
+  209,126,115,116,117,118,119,120,121,122,210,211,212,213,214,215,
+  216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,
+  123,65,66,67,68,69,70,71,72,73,232,233,234,235,236,237,
+  125,74,75,76,77,78,79,80,81,82,238,239,240,241,242,243,
+  92,159,83,84,85,86,87,88,89,90,244,245,246,247,248,249,
+  48,49,50,51,52,53,54,55,56,57,250,251,252,253,254,255
+];
+
+function ebcdicToAscii(bytes) {
+  // Converte array de bytes EBCDIC para string ASCII
+  return Array.from(bytes).map(b => {
+    const c = EBCDIC[b];
+    return (c >= 32 && c < 127) ? String.fromCharCode(c) : ' ';
+  }).join('');
+}
+
+// ─── SEG-Y BINARY HEADER OFFSETS ─────────────────────────────────────────────
+// Offsets relativos ao início do Binary Header (byte 3200 do arquivo).
+// Todos os valores são big-endian por especificação SEG-Y.
+const DATA_FORMATS = {
+  1: 'IBM Float 32-bit', 2: 'Int 32-bit', 3: 'Int 16-bit',
+  4: 'IEEE Float 32-bit (obsoleto)', 5: 'IEEE Float 32-bit',
+  6: 'IEEE Float 64-bit', 7: 'Int 24-bit', 8: 'Int 8-bit'
+};
+
+function readInt16BE(buf, offset) {
+  return (buf[offset] << 8) | buf[offset + 1];
+}
+function readInt32BE(buf, offset) {
+  return ((buf[offset] << 24) | (buf[offset+1] << 16) | (buf[offset+2] << 8) | buf[offset+3]) >>> 0;
+}
+
+// ─── REGEX PARSER — TEXTUAL HEADER ───────────────────────────────────────────
+// Extrai informações semi-estruturadas do Textual Header usando expressões regulares.
+// Taxa de acerto ~80% — depende da padronização de cada empresa/software.
+// Campos não encontrados retornam null e são marcados como "não identificado".
+function parseTextualHeader(text) {
+  const t = text.toUpperCase();
+
+  // Survey name — procura padrões comuns
+  const surveyPatterns = [
+    /SURVEY[\s:]+([A-Z0-9_\-\s]{3,40})/,
+    /LINE[\s:]+([A-Z0-9_\-\s]{3,40})/,
+    /PROJECT[\s:]+([A-Z0-9_\-\s]{3,40})/,
+    /AREA[\s:]+([A-Z0-9_\-\s]{3,40})/,
+    /NAME[\s:]+([A-Z0-9_\-\s]{3,40})/
+  ];
+
+  // Client / acquiring company
+  const clientPatterns = [
+    /CLIENT[\s:]+([A-Z0-9_\-\s&]{3,40})/,
+    /COMPANY[\s:]+([A-Z0-9_\-\s&]{3,40})/,
+    /OPERATOR[\s:]+([A-Z0-9_\-\s&]{3,40})/,
+    /FOR[\s:]+([A-Z0-9_\-\s&]{3,40})/
+  ];
+
+  // Processing company
+  const processorPatterns = [
+    /PROCESSED[\s\w]*BY[\s:]+([A-Z0-9_\-\s&]{3,40})/,
+    /PROCESSING[\s\w]*:[\s]+([A-Z0-9_\-\s&]{3,40})/,
+    /CONTRACTOR[\s:]+([A-Z0-9_\-\s&]{3,40})/,
+    /PROCESSOR[\s:]+([A-Z0-9_\-\s&]{3,40})/,
+    /PROCESSING COMPANY[\s:]+([A-Z0-9_\-\s&]{3,40})/
+  ];
+
+  // Coordinate reference system
+  const crsPatterns = [
+    /COORDINATE[\s\w]*SYSTEM[\s:]+([A-Z0-9_\-\s\/]{3,50})/,
+    /CRS[\s:]+([A-Z0-9_\-\s\/]{3,50})/,
+    /PROJECTION[\s:]+([A-Z0-9_\-\s\/]{3,50})/,
+    /MAP PROJECTION[\s:]+([A-Z0-9_\-\s\/]{3,50})/,
+    /DATUM[\s:]+([A-Z0-9_\-\s\/]{3,40})/,
+    /UTM\s+ZONE\s+(\d{1,2}[NS]?)/,
+    /EPSG[\s:]+(\d{4,5})/,
+    /SIRGAS[\s\w\/]*/,
+    /SAD[\-\s]*69/,
+    /WGS[\-\s]*84/
+  ];
+
+  function tryPatterns(patterns) {
+    for (const p of patterns) {
+      const m = t.match(p);
+      if (m) return m[1] ? m[1].trim().replace(/\s+/g, ' ').substring(0, 50) : m[0].trim();
+    }
+    return null;
+  }
+
+  return {
+    survey:    tryPatterns(surveyPatterns),
+    client:    tryPatterns(clientPatterns),
+    processor: tryPatterns(processorPatterns),
+    crs:       tryPatterns(crsPatterns)
+  };
+}
+
+// ─── MD5 ──────────────────────────────────────────────────────────────────────
+// MD5 puro em JavaScript. Para 2D: calculado no arquivo completo.
+// Para 3D: calculado apenas nos primeiros 3.600 bytes (cabeçalho).
+// Isso evita travar o browser com arquivos de vários GB.
+function md5Bytes(bytes) {
+  function safeAdd(x,y){const l=(x&0xffff)+(y&0xffff);return((x>>16)+(y>>16)+(l>>16)<<16)|(l&0xffff);}
+  function rot(n,c){return(n<<c)|(n>>>(32-c));}
+  function cmn(q,a,b,x,s,t){return safeAdd(rot(safeAdd(safeAdd(a,q),safeAdd(x,t)),s),b);}
+  function ff(a,b,c,d,x,s,t){return cmn((b&c)|((~b)&d),a,b,x,s,t);}
+  function gg(a,b,c,d,x,s,t){return cmn((b&d)|(c&(~d)),a,b,x,s,t);}
+  function hh(a,b,c,d,x,s,t){return cmn(b^c^d,a,b,x,s,t);}
+  function ii(a,b,c,d,x,s,t){return cmn(c^(b|(~d)),a,b,x,s,t);}
+  const n=bytes.length,nw=(((n+8)>>>6)+1)*16,w=new Array(nw).fill(0);
+  for(let i=0;i<n;i++)w[i>>2]|=bytes[i]<<((i%4)*8);
+  w[n>>2]|=0x80<<((n%4)*8);w[nw-2]=n*8;
+  let [a,b,c,d]=[1732584193,-271733879,-1732584194,271733878];
+  for(let i=0;i<nw;i+=16){
+    const[aa,bb,cc,dd]=[a,b,c,d],x=w.slice(i,i+16);
+    a=ff(a,b,c,d,x[0],7,-680876936);d=ff(d,a,b,c,x[1],12,-389564586);c=ff(c,d,a,b,x[2],17,606105819);b=ff(b,c,d,a,x[3],22,-1044525330);
+    a=ff(a,b,c,d,x[4],7,-176418897);d=ff(d,a,b,c,x[5],12,1200080426);c=ff(c,d,a,b,x[6],17,-1473231341);b=ff(b,c,d,a,x[7],22,-45705983);
+    a=ff(a,b,c,d,x[8],7,1770035416);d=ff(d,a,b,c,x[9],12,-1958414417);c=ff(c,d,a,b,x[10],17,-42063);b=ff(b,c,d,a,x[11],22,-1990404162);
+    a=ff(a,b,c,d,x[12],7,1804603682);d=ff(d,a,b,c,x[13],12,-40341101);c=ff(c,d,a,b,x[14],17,-1502002290);b=ff(b,c,d,a,x[15],22,1236535329);
+    a=gg(a,b,c,d,x[1],5,-165796510);d=gg(d,a,b,c,x[6],9,-1069501632);c=gg(c,d,a,b,x[11],14,643717713);b=gg(b,c,d,a,x[0],20,-373897302);
+    a=gg(a,b,c,d,x[5],5,-701558691);d=gg(d,a,b,c,x[10],9,38016083);c=gg(c,d,a,b,x[15],14,-660478335);b=gg(b,c,d,a,x[4],20,-405537848);
+    a=gg(a,b,c,d,x[9],5,568446438);d=gg(d,a,b,c,x[14],9,-1019803690);c=gg(c,d,a,b,x[3],14,-187363961);b=gg(b,c,d,a,x[8],20,1163531501);
+    a=gg(a,b,c,d,x[13],5,-1444681467);d=gg(d,a,b,c,x[2],9,-51403784);c=gg(c,d,a,b,x[7],14,1735328473);b=gg(b,c,d,a,x[12],20,-1926607734);
+    a=hh(a,b,c,d,x[5],4,-378558);d=hh(d,a,b,c,x[8],11,-2022574463);c=hh(c,d,a,b,x[11],16,1839030562);b=hh(b,c,d,a,x[14],23,-35309556);
+    a=hh(a,b,c,d,x[1],4,-1530992060);d=hh(d,a,b,c,x[4],11,1272893353);c=hh(c,d,a,b,x[7],16,-155497632);b=hh(b,c,d,a,x[10],23,-1094730640);
+    a=hh(a,b,c,d,x[13],4,681279174);d=hh(d,a,b,c,x[0],11,-358537222);c=hh(c,d,a,b,x[3],16,-722521979);b=hh(b,c,d,a,x[6],23,76029189);
+    a=hh(a,b,c,d,x[9],4,-640364487);d=hh(d,a,b,c,x[12],11,-421815835);c=hh(c,d,a,b,x[15],16,530742520);b=hh(b,c,d,a,x[2],23,-995338651);
+    a=ii(a,b,c,d,x[0],6,-198630844);d=ii(d,a,b,c,x[7],10,1126891415);c=ii(c,d,a,b,x[14],15,-1416354905);b=ii(b,c,d,a,x[5],21,-57434055);
+    a=ii(a,b,c,d,x[12],6,1700485571);d=ii(d,a,b,c,x[3],10,-1894986606);c=ii(c,d,a,b,x[10],15,-1051523);b=ii(b,c,d,a,x[1],21,-2054922799);
+    a=ii(a,b,c,d,x[8],6,1873313359);d=ii(d,a,b,c,x[15],10,-30611744);c=ii(c,d,a,b,x[6],15,-1560198380);b=ii(b,c,d,a,x[13],21,1309151649);
+    a=ii(a,b,c,d,x[4],6,-145523070);d=ii(d,a,b,c,x[11],10,-1120210379);c=ii(c,d,a,b,x[2],15,718787259);b=ii(b,c,d,a,x[9],21,-343485551);
+    a=safeAdd(a,aa);b=safeAdd(b,bb);c=safeAdd(c,cc);d=safeAdd(d,dd);
+  }
+  return [a,b,c,d].map(n=>{let s='';for(let i=0;i<4;i++)s+=('0'+((n>>(i*8))&0xff).toString(16)).slice(-2);return s;}).join('');
+}
+
+// ─── UUID ─────────────────────────────────────────────────────────────────────
+function generateUUID() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
+// ─── COMBOS ───────────────────────────────────────────────────────────────────
+// Controla as três combo boxes encadeadas.
+// Combo 3 é filtrada por Combo 1 (aquisição) e Combo 2 (domínio).
+// Quando 3D: Combo 3 mostra apenas N/A mas permanece habilitada.
+function buildProcessingCombo() {
+  const aquisicao = document.getElementById('combo-aquisicao').value;
+  const dominio   = document.getElementById('combo-dominio').value;
+  const combo3    = document.getElementById('combo-processamento');
+
+  combo3.innerHTML = '';
+
+  if (aquisicao === '3D') {
+    combo3.innerHTML = '<option value="N/A">N/A</option>';
+    combo3.disabled = true;
+    return;
+  }
+
+  combo3.disabled = false;
+
+  const filtered = PROCESSING_TYPES.filter(p => {
+    if (dominio === 'Tempo')        return p.domain === 'TIME' || p.domain === 'BOTH';
+    if (dominio === 'Profundidade') return p.domain === 'DEPTH' || p.domain === 'BOTH';
+    return true; // Ambos
+  });
+
+  filtered.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p.sigla;
+    opt.textContent = `${p.name} (${p.sigla})`;
+    combo3.appendChild(opt);
+  });
+}
+
+function onAquisicaoChange() { buildProcessingCombo(); }
+function onDominioChange()   { buildProcessingCombo(); }
+
+// Init combos
+buildProcessingCombo();
+
+// ─── DRAG & DROP ──────────────────────────────────────────────────────────────
+const dz = document.getElementById('dropzone');
+dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('dragover'); });
+dz.addEventListener('dragleave', ()=> dz.classList.remove('dragover'));
+dz.addEventListener('drop', e => {
+  e.preventDefault(); dz.classList.remove('dragover');
+  const f = e.dataTransfer.files[0];
+  if (f) handleFile(f);
+});
+dz.addEventListener('click', e => {
+  if (e.target.tagName !== 'BUTTON') document.getElementById('file-input').click();
+});
+document.getElementById('file-input').addEventListener('change', e => {
+  if (e.target.files[0]) handleFile(e.target.files[0]);
+});
+
+// ─── FILE HANDLER ─────────────────────────────────────────────────────────────
+// Lê os primeiros 3.600 bytes do arquivo SEG-Y para o parse do cabeçalho.
+// Para MD5: lê o arquivo completo se 2D, ou apenas os 3.600 bytes se 3D.
+let currentFile   = null;
+let parsedData    = null;
+let md5Ready      = false;
+
+async function handleFile(file) {
+  const ext = file.name.toLowerCase();
+  if (!ext.match(/\.(sgy|segy)$/)) {
+    showToast('⚠️ Somente arquivos .sgy ou .segy são aceitos.', 'error');
+    return;
+  }
+  if (file.size < 3600) {
+    showToast('❌ Arquivo menor que 3.600 bytes — inválido para SEG-Y.', 'error');
+    return;
+  }
+
+  currentFile = file;
+  md5Ready    = false;
+
+  // Update dropzone
+  dz.classList.add('has-file');
+  document.getElementById('dz-icon').textContent  = '✅';
+  document.getElementById('dz-title').textContent = file.name;
+  document.getElementById('dz-sub').textContent   = formatSize(file.size) + ' — cabeçalho carregado';
+
+  // Read first 3600 bytes
+  const headerBlob   = file.slice(0, 3600);
+  const headerBuffer = await headerBlob.arrayBuffer();
+  const headerBytes  = new Uint8Array(headerBuffer);
+
+  // Parse
+  parsedData = parseSEGY(headerBytes, file);
+  parsedData.submission_id = generateUUID();
+
+  // Render UI
+  renderUI(parsedData);
+
+  // Calculate MD5 async
+  const aquisicao = document.getElementById('combo-aquisicao').value;
+  document.getElementById('m-md5').textContent = '⏳ calculando...';
+
+  if (aquisicao === '2D') {
+    // Full file MD5 — may take time for large files
+    const fullBuffer = await file.arrayBuffer();
+    parsedData.md5 = md5Bytes(new Uint8Array(fullBuffer));
+  } else {
+    // Header only MD5 for 3D
+    parsedData.md5 = md5Bytes(headerBytes);
+  }
+
+  md5Ready = true;
+  set('m-md5', parsedData.md5);
+  document.getElementById('btn-submit').disabled = false;
+  document.getElementById('btn-submit').style.background = 'var(--teal)';
+}
+
+// ─── SEG-Y PARSER ─────────────────────────────────────────────────────────────
+// Parseia o cabeçalho SEG-Y a partir dos primeiros 3.600 bytes.
+// Textual Header: bytes 0-3199 (EBCDIC ou ASCII)
+// Binary Header:  bytes 3200-3599
+function parseSEGY(bytes, file) {
+  // Textual Header (3200 bytes)
+  const textBytes   = bytes.slice(0, 3200);
+  const isEBCDIC    = textBytes[0] === 0xC3 || textBytes[0] === 0xE3 || textBytes[0] > 127;
+  const textualRaw  = isEBCDIC ? ebcdicToAscii(textBytes) : String.fromCharCode(...textBytes);
+
+  // Format textual header into 40 lines of 80 chars
+  const lines = [];
+  for (let i = 0; i < 40; i++) {
+    lines.push(textualRaw.substring(i * 80, (i + 1) * 80).trimEnd());
+  }
+  const textualFormatted = lines.join('\n');
+
+  // Binary Header
+  const bh = bytes.slice(3200, 3600);
+
+  // SEG-Y version: bytes 300-301 of binary header (offset 3500-3501 absolute)
+  const segyRevMajor = bh[300];
+  const segyRevMinor = bh[301];
+  let version = 'Não identificada';
+  if (segyRevMajor === 1 && segyRevMinor === 0) version = 'Rev 1.0';
+  else if (segyRevMajor === 2 && segyRevMinor === 0) version = 'Rev 2.0';
+  else if (segyRevMajor === 2 && segyRevMinor === 1) version = 'Rev 2.1';
+  else if (segyRevMajor === 0 && segyRevMinor === 0) version = 'Rev 1.0 (implícito)';
+  else if (segyRevMajor > 0) version = `Rev ${segyRevMajor}.${segyRevMinor}`;
+
+  // Sample interval: bytes 16-17 of binary header (microseconds)
+  const sampleIntervalUs = readInt16BE(bh, 16);
+  const sampleIntervalMs = sampleIntervalUs > 0 ? (sampleIntervalUs / 1000).toFixed(3) + ' ms' : 'não identificado';
+
+  // Samples per trace: bytes 20-21
+  const samplesPerTrace = readInt16BE(bh, 20);
+
+  // Recording time
+  let recTime = 'não identificado';
+  if (sampleIntervalUs > 0 && samplesPerTrace > 0) {
+    const ms = (sampleIntervalUs * samplesPerTrace) / 1000;
+    recTime = ms >= 1000 ? (ms / 1000).toFixed(2) + ' s' : ms.toFixed(1) + ' ms';
+  }
+
+  // Data format: bytes 24-25
+  const formatCode = readInt16BE(bh, 24);
+  const dataFormat = DATA_FORMATS[formatCode] || `Formato ${formatCode} — desconhecido`;
+
+  // Byte order: bytes 296-297 (fixed value 0x0100 = big-endian in Rev 1+)
+  const byteOrderVal = readInt16BE(bh, 296);
+  const byteOrder = byteOrderVal === 256 ? 'Big-endian (padrão SEG-Y)' :
+                    byteOrderVal === 1   ? 'Little-endian (não padrão)' : 'Não identificado';
+
+  // Regex parse of textual header
+  const regexResult = parseTextualHeader(textualFormatted);
+
+  return {
+    filename:       file.name,
+    size:           formatSize(file.size),
+    size_bytes:     file.size,
+    md5:            null, // calculated async
+    version,
+    sampleIntervalUs,
+    sampleIntervalMs,
+    samplesPerTrace,
+    recTime,
+    formatCode,
+    dataFormat,
+    byteOrder,
+    textual:        textualFormatted,
+    isEBCDIC,
+    survey:         regexResult.survey,
+    client:         regexResult.client,
+    processor:      regexResult.processor,
+    crs:            regexResult.crs
+  };
+}
+
+// ─── RENDER ───────────────────────────────────────────────────────────────────
+function renderUI(data) {
+  set('m-filename', data.filename);
+  set('m-size',     data.size);
+  set('m-sid',      data.submission_id);
+  set('m-version',  data.version);
+  set('m-format',   data.dataFormat);
+  set('m-interval', data.sampleIntervalMs);
+  set('m-samples',  data.samplesPerTrace > 0 ? data.samplesPerTrace.toString() : null);
+  set('m-rectime',  data.recTime);
+  set('m-byteorder',data.byteOrder);
+
+  // Regex fields with visual indicator
+  setRegex('m-survey',    data.survey);
+  setRegex('m-client',    data.client);
+  setRegex('m-processor', data.processor);
+  setRegex('m-crs',       data.crs);
+
+  // Textual header
+  document.getElementById('textual-content').textContent = data.textual;
+
+  // QC Checks
+  runQC(data);
+
+  document.getElementById('metadata-card').style.display = 'block';
+  document.getElementById('qc-card').style.display       = 'block';
+  document.getElementById('actions-card').style.display  = 'block';
+
+  // Disable submit until MD5 is ready
+  document.getElementById('btn-submit').disabled = true;
+  document.getElementById('btn-label').textContent = 'Calculando MD5...';
+}
+
+function set(id, val) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (val && val !== 'não identificado') {
+    el.textContent = val;
+    el.classList.remove('empty');
+  } else {
+    el.textContent = 'não identificado';
+    el.classList.add('empty');
+  }
+}
+
+function setRegex(id, val) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  // Map field IDs to their fallback select IDs
+  const fallbackMap = { 'm-processor': 'sel-processor', 'm-crs': 'sel-crs' };
+  if (val) {
+    el.textContent = val;
+    el.classList.remove('empty', 'regex-not-found');
+    el.classList.add('regex-found');
+  } else {
+    el.textContent = 'não identificado';
+    el.classList.add('empty', 'regex-not-found');
+    el.classList.remove('regex-found');
+  }
+}
+
+// ─── QC CHECKS ────────────────────────────────────────────────────────────────
+// Executa 6 verificações automáticas no cabeçalho SEG-Y.
+// Cada check retorna: ok, warn ou fail com mensagem de detalhe.
+function runQC(data) {
+  const checks = [];
+
+  // 1. Tamanho mínimo válido
+  checks.push({
+    label: 'Tamanho do arquivo',
+    ok: data.size_bytes >= 3600,
+    warn: false,
+    detail: data.size_bytes >= 3600 ? data.size : 'Arquivo menor que 3.600 bytes — inválido'
+  });
+
+  // 2. Versão SEG-Y identificada
+  const versionOk = !data.version.includes('Não identificada');
+  checks.push({
+    label: 'Versão SEG-Y identificada',
+    ok: versionOk,
+    warn: data.version.includes('implícito'),
+    detail: data.version
+  });
+
+  // 3. Textual Header legível
+  const readableChars = (data.textual.match(/[a-zA-Z0-9\s]/g) || []).length;
+  const readableRatio = readableChars / data.textual.length;
+  checks.push({
+    label: 'Textual Header legível',
+    ok: readableRatio > 0.7,
+    warn: readableRatio > 0.4 && readableRatio <= 0.7,
+    detail: `${(readableRatio * 100).toFixed(0)}% de caracteres legíveis`
+  });
+
+  // 4. Formato de dado reconhecido
+  const formatOk = data.formatCode >= 1 && data.formatCode <= 8;
+  checks.push({
+    label: 'Formato de dado reconhecido',
+    ok: formatOk && data.formatCode !== 4,
+    warn: data.formatCode === 1, // IBM float é válido mas obsoleto
+    detail: data.dataFormat + (data.formatCode === 1 ? ' — considere converter para IEEE' : '')
+  });
+
+  // 5. Intervalo de amostragem razoável (0.5ms a 8ms para sísmica de reflexão)
+  const siMs = data.sampleIntervalUs / 1000;
+  const siOk = siMs >= 0.5 && siMs <= 8;
+  const siWarn = siMs > 0 && (siMs < 0.5 || siMs > 8);
+  checks.push({
+    label: 'Intervalo de amostragem válido',
+    ok: siOk,
+    warn: siWarn,
+    detail: data.sampleIntervalUs > 0 ? `${siMs.toFixed(1)} ms (esperado: 0.5–8 ms)` : 'Não identificado'
+  });
+
+  // 6. Tempo de registro razoável (1s a 20s)
+  let recOk = false, recWarn = false, recDetail = data.recTime;
+  if (data.sampleIntervalUs > 0 && data.samplesPerTrace > 0) {
+    const recS = (data.sampleIntervalUs * data.samplesPerTrace) / 1e6;
+    recOk   = recS >= 1 && recS <= 20;
+    recWarn = recS > 0 && (recS < 1 || recS > 20);
+    recDetail = `${recS.toFixed(2)} s (esperado: 1–20 s)`;
+  }
+  checks.push({
+    label: 'Tempo de registro razoável',
+    ok: recOk,
+    warn: recWarn,
+    detail: recDetail
+  });
+
+  // Render QC
+  const grid = document.getElementById('qc-grid');
+  grid.innerHTML = checks.map(c => {
+    const cls    = c.ok ? 'ok' : c.warn ? 'warn' : 'fail';
+    const icon   = c.ok ? '✅' : c.warn ? '⚠️' : '❌';
+    return `<div class="qc-item ${cls}">
+      <span class="qc-icon">${icon}</span>
+      <span class="qc-label">${c.label}</span>
+      <span class="qc-detail">${c.detail}</span>
+    </div>`;
+  }).join('');
+
+  // QC summary score
+  const passed = checks.filter(c => c.ok).length;
+  const warned = checks.filter(c => c.warn).length;
+  const banner = document.getElementById('validation-banner');
+  if (passed === checks.length) {
+    banner.className = 'banner ok';
+    banner.innerHTML = `<div style="font-size:13px;font-weight:700;color:#5DBF8A;">✅ QC aprovado — ${passed}/${checks.length} verificações OK</div>`;
+  } else {
+    banner.className = 'banner warn';
+    banner.innerHTML = `<div style="font-size:13px;font-weight:700;color:var(--ambar);">⚠️ QC com alertas — ${passed} OK · ${warned} avisos · ${checks.length - passed - warned} falhas</div>`;
+  }
+  banner.style.display = 'block';
+}
+
+// ─── TEXTUAL HEADER TOGGLE ────────────────────────────────────────────────────
+function toggleTextual() {
+  const el = document.getElementById('textual-content');
+  el.classList.toggle('show');
+}
+
+function formatSize(bytes) {
+  if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(2) + ' GB';
+  if (bytes >= 1048576)    return (bytes / 1048576).toFixed(1) + ' MB';
+  return (bytes / 1024).toFixed(1) + ' KB';
+}
+
+// ─── HISTORY ──────────────────────────────────────────────────────────────────
+function saveHistory(data) {
+  const history = JSON.parse(sessionStorage.getItem('sgy_history') || '[]');
+  history.unshift({
+    survey:    data.survey || data.filename,
+    arquivo:   data.filename,
+    aquisicao: document.getElementById('combo-aquisicao').value,
+    timestamp: new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo', hour:'2-digit', minute:'2-digit'})
+  });
+  if (history.length > 5) history.pop();
+  sessionStorage.setItem('sgy_history', JSON.stringify(history));
+  renderHistory();
+}
+
+function renderHistory() {
+  const history = JSON.parse(sessionStorage.getItem('sgy_history') || '[]');
+  const card = document.getElementById('history-card');
+  const body = document.getElementById('history-body');
+  if (history.length === 0) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+  body.innerHTML = history.map(h => `
+    <div class="history-item">
+      <span class="history-badge">${h.aquisicao}</span>
+      <div class="history-info">
+        <div class="history-survey">${h.survey}</div>
+        <div class="history-file">${h.arquivo}</div>
+      </div>
+      <span class="history-time">${h.timestamp}</span>
+    </div>
+  `).join('');
+}
+
+// ─── MODAL ────────────────────────────────────────────────────────────────────
+function showModal(data) {
+  const aquisicao    = document.getElementById('combo-aquisicao').value;
+  const dominio      = document.getElementById('combo-dominio').value;
+  const processamento = document.getElementById('combo-processamento').value;
+  document.getElementById('modal-meta').innerHTML = `
+    <div class="modal-meta-row"><span class="mlabel">Survey</span><span class="mvalue">${data.survey || '—'}</span></div>
+    <div class="modal-meta-row"><span class="mlabel">Arquivo</span><span class="mvalue">${data.filename}</span></div>
+    <div class="modal-meta-row"><span class="mlabel">Aquisição</span><span class="mvalue">${aquisicao}</span></div>
+    <div class="modal-meta-row"><span class="mlabel">Domínio</span><span class="mvalue">${dominio}</span></div>
+    <div class="modal-meta-row"><span class="mlabel">Processamento</span><span class="mvalue">${processamento}</span></div>
+    <div class="modal-meta-row"><span class="mlabel">Versão SEG-Y</span><span class="mvalue">${data.version}</span></div>
+    <div class="modal-meta-row"><span class="mlabel">Status</span><span class="mvalue" style="color:#5DBF8A;">✅ Enviado com sucesso</span></div>
+  `;
+  document.getElementById('modal-overlay').classList.add('show');
+}
+function closeModal()         { document.getElementById('modal-overlay').classList.remove('show'); }
+function closeModalAndReset() { closeModal(); setTimeout(resetForm, 300); }
+
+// ─── PROGRESS ─────────────────────────────────────────────────────────────────
+function setStep(n, state) {
+  const el = document.getElementById('step-' + n);
+  if (!el) return;
+  el.className = 'progress-step ' + state;
+  const icons   = { active:'⏳', done:'✅', error:'❌' };
+  const labels  = { 1:'Preparando dados...', 2:'Enviando para Power Automate...', 3: state === 'error' ? 'Erro no envio' : 'Concluído' };
+  el.innerHTML  = `<span class="step-icon">${icons[state]||'⏸️'}</span> ${labels[n]}`;
+}
+
+// ─── SUBMIT ───────────────────────────────────────────────────────────────────
+// Envia o payload com metadados do SEG-Y ao Power Automate via webhook HTTP.
+// Timeout de 50 segundos. O arquivo físico NÃO é enviado no payload.
+// ATENÇÃO: o parâmetro "sig" da URL expira periodicamente — atualizar quando ocorrer erro 401.
+document.getElementById('btn-submit').addEventListener('click', async () => {
+  if (!currentFile || !parsedData || !md5Ready) return;
+
+  const webhookUrl = document.getElementById('webhook-url').value.trim();
+  const aquisicao    = document.getElementById('combo-aquisicao').value;
+  const dominio      = document.getElementById('combo-dominio').value;
+  const processamento = document.getElementById('combo-processamento').value;
+
+  const btn = document.getElementById('btn-submit');
+  btn.classList.add('loading');
+  document.getElementById('btn-label').textContent = 'Enviando...';
+
+  const pw = document.getElementById('progress-wrap');
+  pw.classList.add('show');
+  setStep(1, 'active'); setStep(2, ''); setStep(3, '');
+
+  const payload = {
+    submissao: {
+      timestamp: new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).replace(/(\d{2})\/(\d{2})\/(\d{4})/,'$3-$2-$1'),
+      origem:    'Interface Web SGY Upload',
+      submission_id: parsedData.submission_id
+    },
+    arquivo: {
+      nome:       parsedData.filename,
+      tamanho:    parsedData.size,
+      tamanho_bytes: parsedData.size_bytes,
+      md5:        parsedData.md5,
+      md5_tipo:   aquisicao === '3D' ? 'header_3600_bytes' : 'arquivo_completo'
+    },
+    classificacao: {
+      tipo_aquisicao:   aquisicao,
+      dominio:          dominio,
+      processamento:    processamento
+    },
+    tecnico: {
+      versao_segy:       parsedData.version,
+      formato_dado:      parsedData.dataFormat,
+      formato_codigo:    parsedData.formatCode,
+      intervalo_amost:   parsedData.sampleIntervalMs,
+      amostras_traco:    parsedData.samplesPerTrace,
+      tempo_registro:    parsedData.recTime,
+      byte_order:        parsedData.byteOrder,
+      encoding_header:   parsedData.isEBCDIC ? 'EBCDIC' : 'ASCII'
+    },
+    survey: {
+      nome:            parsedData.survey,
+      empresa_cliente: parsedData.client,
+      empresa_proc:    parsedData.processor || document.getElementById('sel-processor').value || 'não identificado',
+      crs:             parsedData.crs       || document.getElementById('sel-crs').value       || 'não identificado'
+    }
+  };
+
+  setStep(1, 'done'); setStep(2, 'active');
+  const fill = document.getElementById('step-bar-fill');
+  fill.style.width = '0%';
+  setTimeout(() => { fill.style.width = '90%'; }, 100);
+
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), 50000);
+
+  try {
+    const resp = await fetch(webhookUrl, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload), signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    if (resp.ok || resp.status === 202) {
+      fill.style.width = '100%';
+      setStep(2, 'done'); setStep(3, 'done');
+      saveHistory(parsedData);
+      setTimeout(() => showModal(parsedData), 400);
+      btn.disabled = true;
+      document.getElementById('btn-label').textContent = '✓ Enviado';
+      btn.style.background = 'var(--ok)';
+    } else { throw new Error(`HTTP ${resp.status}`); }
+  } catch(err) {
+    clearTimeout(timeoutId);
+    const isTimeout = err.name === 'AbortError';
+    setStep(2,'error'); setStep(3,'error'); fill.style.width = '0%';
+    showToast(isTimeout ? '⏱️ Tempo limite de 50s excedido. Tente novamente.' : `❌ Erro ao enviar: ${err.message}`, 'error');
+  } finally {
+    btn.classList.remove('loading');
+    if (!btn.disabled) document.getElementById('btn-label').textContent = 'Revisar e enviar →';
+  }
+});
+
+// ─── RESET ────────────────────────────────────────────────────────────────────
+function resetForm() {
+  currentFile = parsedData = null; md5Ready = false;
+  dz.classList.remove('has-file');
+  document.getElementById('dz-icon').textContent  = '📂';
+  document.getElementById('dz-title').textContent = 'Arraste o arquivo SEG-Y aqui';
+  document.getElementById('dz-sub').textContent   = 'ou clique para selecionar';
+  document.getElementById('file-input').value     = '';
+  document.getElementById('validation-banner').style.display = 'none';
+  document.getElementById('metadata-card').style.display     = 'none';
+  document.getElementById('qc-card').style.display           = 'none';
+  document.getElementById('actions-card').style.display      = 'none';
+  document.getElementById('progress-wrap').classList.remove('show');
+  const btn = document.getElementById('btn-submit');
+  btn.disabled = true; btn.style.background = '';
+  btn.classList.remove('loading');
+  document.getElementById('btn-label').textContent = 'Revisar e enviar →';
+  document.getElementById('step-bar-fill').style.width = '0%';
+}
+
+// ─── TOAST ────────────────────────────────────────────────────────────────────
+function showToast(msg, type='') {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = `toast ${type} show`;
+  setTimeout(() => t.classList.remove('show'), 5000);
+}
+
+// Init history
+renderHistory();
+</script>
+</body>
+</html>
