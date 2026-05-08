@@ -323,6 +323,13 @@
   .fallback-hint {
     font-size: 10px; color: var(--ambar); margin-top: 2px;
   }
+
+  /* MD5 STATUS */
+  .md5-status {
+    display: none; text-align: center; font-size: 12px;
+    color: var(--ambar); padding: 8px; margin-top: -8px; margin-bottom: 4px;
+  }
+  .md5-status.show { display: block; }
   /* TOAST */
   .toast {
     position: fixed; bottom: 28px; right: 28px;
@@ -529,6 +536,7 @@
 
   <!-- ACTIONS -->
   <div class="card" id="actions-card" style="display:none;">
+    <div class="md5-status" id="md5-status">⏳ Calculando MD5 — aguarde antes de enviar...</div>
     <div class="progress-wrap" id="progress-wrap">
       <div class="progress-step" id="step-1"><span class="step-icon">📦</span> Preparando dados...</div>
       <div class="progress-step" id="step-2"><span class="step-icon">📡</span> Enviando para Power Automate...</div>
@@ -675,17 +683,19 @@ function parseTextualHeader(text) {
   ];
 
   // Coordinate reference system
+  // Padrões ordenados do mais específico ao mais genérico
+  // Evita capturar fragmentos — todos exigem pelo menos uma palavra completa após o separador
   const crsPatterns = [
-    /COORDINATE[\s\w]*SYSTEM[\s:]+([A-Z0-9_\-\s\/]{3,50})/,
-    /CRS[\s:]+([A-Z0-9_\-\s\/]{3,50})/,
-    /PROJECTION[\s:]+([A-Z0-9_\-\s\/]{3,50})/,
-    /MAP PROJECTION[\s:]+([A-Z0-9_\-\s\/]{3,50})/,
-    /DATUM[\s:]+([A-Z0-9_\-\s\/]{3,40})/,
-    /UTM\s+ZONE\s+(\d{1,2}[NS]?)/,
-    /EPSG[\s:]+(\d{4,5})/,
-    /SIRGAS[\s\w\/]*/,
-    /SAD[\-\s]*69/,
-    /WGS[\-\s]*84/
+    /EPSG[\s:)\-]+(\d{4,5})/,
+    /CRS[\s:]+([A-Z][A-Z0-9_\-\/\s]{3,40}?)(?:\s{2,}|$)/m,
+    /COORDINATE SYSTEM[\s:]+([A-Z][A-Z0-9_\-\/\s]{3,40}?)(?:\s{2,}|$)/m,
+    /MAP PROJECTION[\s:]+([A-Z][A-Z0-9_\-\/\s]{3,40}?)(?:\s{2,}|$)/m,
+    /PROJECTION[\s:]+([A-Z][A-Z0-9_\-\/\s]{3,40}?)(?:\s{2,}|$)/m,
+    /\b(SIRGAS\s*2000[\s\/\-]*UTM[\s\/\-]*ZONE?[\s]*\d{1,2}[NS]?)\b/,
+    /\b(UTM\s+ZONE\s+\d{1,2}[NS]?[\s,\-]*(?:WGS84|SAD69|SIRGAS)?)\b/,
+    /\b(SIRGAS\s*2000)\b/,
+    /\b(SAD[\-\s]*69)\b/,
+    /\b(WGS[\-\s]*84)\b/
   ];
 
   function tryPatterns(patterns) {
@@ -860,6 +870,7 @@ async function handleFile(file) {
 
   md5Ready = true;
   set('m-md5', parsedData.md5);
+  document.getElementById('md5-status').classList.remove('show');
   document.getElementById('btn-submit').disabled = false;
   document.getElementById('btn-submit').style.background = 'var(--teal)';
 }
@@ -972,7 +983,8 @@ function renderUI(data) {
 
   // Disable submit until MD5 is ready
   document.getElementById('btn-submit').disabled = true;
-  document.getElementById('btn-label').textContent = 'Calculando MD5...';
+  document.getElementById('btn-label').textContent = 'Enviar';
+  document.getElementById('md5-status').classList.add('show');
 }
 
 function set(id, val) {
@@ -1278,6 +1290,7 @@ function resetForm() {
   btn.classList.remove('loading');
   document.getElementById('btn-label').textContent = 'Enviar';
   document.getElementById('step-bar-fill').style.width = '0%';
+  document.getElementById('md5-status').classList.remove('show');
 }
 
 // ─── TOAST ────────────────────────────────────────────────────────────────────
